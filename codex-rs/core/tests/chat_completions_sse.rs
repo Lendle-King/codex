@@ -318,3 +318,116 @@ async fn streams_reasoning_before_tool_call() {
 
     assert!(matches!(events[3], ResponseEvent::Completed { .. }));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handles_openrouter_early_stream_close() {
+    if network_disabled() {
+        println!(
+            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
+        );
+        return;
+    }
+
+    // Simulate OpenRouter behavior: stream with finish_reason but NO [DONE] marker
+    // This should still complete properly, not result in a stream error
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\" world!\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        // Note: NO "[DONE]" marker - stream just ends here like OpenRouter does
+    );
+
+    let events = run_stream(sse).await;
+
+    // Should receive:
+    // 1. OutputTextDelta("Hello")
+    // 2. OutputTextDelta(" world!")
+    // 3. OutputItemDone(assistant message)
+    // 4. Completed
+    assert!(
+        events.len() >= 4,
+        "Should receive at least 4 events, got {}: {:?}",
+        events.len(),
+        events
+    );
+
+    match &events[0] {
+        ResponseEvent::OutputTextDelta(text) => assert_eq!(text, "Hello"),
+        other => panic!("expected first text delta, got {other:?}"),
+    }
+
+    match &events[1] {
+        ResponseEvent::OutputTextDelta(text) => assert_eq!(text, " world!"),
+        other => panic!("expected second text delta, got {other:?}"),
+    }
+
+    match &events[2] {
+        ResponseEvent::OutputItemDone(item) => assert_message(item, "Hello world!"),
+        other => panic!("expected terminal message, got {other:?}"),
+    }
+
+    // Most importantly: should complete gracefully without error
+    match &events[3] {
+        ResponseEvent::Completed { .. } => {
+            println!("✓ Stream completed properly even without [DONE] marker");
+        }
+        other => panic!("expected Completed event, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handles_premature_stream_close() {
+    if network_disabled() {
+        println!(
+            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
+        );
+        return;
+    }
+
+    // Simulate a problematic stream that closes abruptly without finish_reason or [DONE]
+    // This is what might be happening with OpenRouter
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
+        // Stream cuts off here - no finish_reason, no [DONE], just EOF
+    );
+
+    let events = run_stream(sse).await;
+
+    // Should still handle this gracefully:
+    // 1. OutputTextDelta("Hello")
+    // 2. OutputTextDelta(" world")
+    // 3. OutputItemDone(final message with accumulated text)
+    // 4. Completed (graceful handling of premature close)
+    assert!(
+        events.len() >= 3,
+        "Should receive at least 3 events, got {}: {:?}",
+        events.len(),
+        events
+    );
+
+    match &events[0] {
+        ResponseEvent::OutputTextDelta(text) => assert_eq!(text, "Hello"),
+        other => panic!("expected first text delta, got {other:?}"),
+    }
+
+    match &events[1] {
+        ResponseEvent::OutputTextDelta(text) => assert_eq!(text, " world"),
+        other => panic!("expected second text delta, got {other:?}"),
+    }
+
+    // Should now emit the accumulated text as a final message
+    match &events[2] {
+        ResponseEvent::OutputItemDone(item) => assert_message(item, "Hello world"),
+        other => panic!("expected final message with accumulated text, got {other:?}"),
+    }
+
+    // Last event should be Completed - graceful handling even with premature close
+    match events.last() {
+        Some(ResponseEvent::Completed { .. }) => {
+            println!("✓ Stream handled premature close gracefully with final text emission");
+        }
+        Some(other) => panic!("expected final Completed event, got {other:?}"),
+        None => panic!("no events received"),
+    }
+}

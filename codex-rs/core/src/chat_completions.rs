@@ -383,7 +383,36 @@ async fn process_chat_sse<S>(
                 return;
             }
             Ok(None) => {
-                // Stream closed gracefully – emit Completed with dummy id.
+                // Stream closed gracefully – emit any accumulated content before Completed event.
+                // This handles cases where providers (like OpenRouter) close streams abruptly
+                // without sending proper finish_reason or [DONE] markers.
+
+                // Emit any accumulated assistant text first
+                if !assistant_text.is_empty() {
+                    let item = ResponseItem::Message {
+                        role: "assistant".to_string(),
+                        content: vec![ContentItem::OutputText {
+                            text: std::mem::take(&mut assistant_text),
+                        }],
+                        id: None,
+                    };
+                    let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
+                }
+
+                // Emit any accumulated reasoning text
+                if !reasoning_text.is_empty() {
+                    let item = ResponseItem::Reasoning {
+                        id: String::new(),
+                        summary: Vec::new(),
+                        content: Some(vec![ReasoningItemContent::ReasoningText {
+                            text: std::mem::take(&mut reasoning_text),
+                        }]),
+                        encrypted_content: None,
+                    };
+                    let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
+                }
+
+                // Finally emit Completed with dummy id
                 let _ = tx_event
                     .send(Ok(ResponseEvent::Completed {
                         response_id: String::new(),
