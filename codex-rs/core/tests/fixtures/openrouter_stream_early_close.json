@@ -1,0 +1,14 @@
+[
+  {
+    "type": "chunk",
+    "data": "{\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}"
+  },
+  {
+    "type": "chunk", 
+    "data": "{\"choices\":[{\"delta\":{\"content\":\" world!\"}}]}"
+  },
+  {
+    "type": "chunk",
+    "data": "{\"choices\":[{\"finish_reason\":\"stop\"}]}"
+  }
+]
